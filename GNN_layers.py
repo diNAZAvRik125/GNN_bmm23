@@ -4,7 +4,6 @@ from torch import nn
 import torch_scatter
 
 from torch_geometric.nn.conv import MessagePassing
-from torch_geometric.nn import MessageNorm
 
 
 class ProcessorLayer(MessagePassing):
@@ -44,7 +43,6 @@ class ProcessorLayer(MessagePassing):
         self.node_mlp[2].reset_parameters()
 
     def forward(self, x, edge_index, edge_attr):
-
         out, updated_edges = self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
         updated_nodes = torch.cat([x, out], dim=1)

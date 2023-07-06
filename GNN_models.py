@@ -2,8 +2,6 @@ import torch
 from torch import nn
 
 from torch_geometric.nn.pool.glob import global_mean_pool
-from torch_geometric.nn import EdgePooling, DeepGCNLayer, GENConv, MessageNorm
-
 from GNN_layers import ProcessorLayer, SmoothingLayer
 
 
@@ -99,8 +97,8 @@ class FlowGNN_original_skipBC(nn.Module):  # напрямую прокидыва
 
 class FlowGNN_conv_block(nn.Module):
 
-    def __init__(self, edge_dims, node_dims, hidden_size=128, skipcon_nodes_idx=None, skipcon_edges_idx=None,
-                 fc_skipcon=False, batchnorm=False, idx=0, selu=False):
+    def __init__(self, edge_dims, node_dims, hidden_size=128, node_skip_cons_idx=None, edge_skip_cons_idx=None,
+                 fc_con=False, batchnorm=False, idx=0, selu=False):
         super(FlowGNN_conv_block, self).__init__()
         self.conv = ProcessorLayer(edge_dims, node_dims, hidden_size, selu)
         self.smooth = SmoothingLayer()
@@ -109,29 +107,28 @@ class FlowGNN_conv_block(nn.Module):
         if batchnorm:
             self.node_norm_layer = nn.BatchNorm1d(node_dims)
 
-        self.skipcon_nodes_idx = skipcon_nodes_idx  # int, layer indx
-        self.skipcon_edges_idx = skipcon_edges_idx
-        self.fc_skipcon = fc_skipcon  # bool, 
+        self.node_skip_cons_idx = node_skip_cons_idx  # int, layer indx
+        self.edge_skip_cons_idx = edge_skip_cons_idx
+        self.fc_con = fc_con  # bool,
         self.idx = idx
 
-    # TODO: rename arguments
-    def forward(self, node_attr, edge_index, edge_attr, skip_connec=None, skip_connec_ed=None, fc_skipconnec=None,
+    def forward(self, node_attr, edge_idx, edge_attr, node_skip_cons=None, edge_skip_cons=None, fc_con=None,
                 skip_info=None):
 
-        if skip_connec is not None:
-            node_attr = torch.add(node_attr, skip_connec)
+        if node_skip_cons is not None:
+            node_attr = torch.add(node_attr, node_skip_cons)
 
-        if skip_connec_ed is not None:
-            edge_attr = torch.add(edge_attr, skip_connec_ed)
+        if edge_skip_cons is not None:
+            edge_attr = torch.add(edge_attr, edge_skip_cons)
 
         if skip_info is not None:
             node_attr = torch.cat([node_attr, skip_info], 1)
 
-        if self.fc_skipcon:
-            node_attr = torch.cat([node_attr, fc_skipconnec], 1)
+        if self.fc_con:
+            node_attr = torch.cat([node_attr, fc_con], 1)
 
-        node_attr, edge_attr = self.conv(node_attr, edge_index, edge_attr)
-        node_attr, edge_attr = self.smooth(node_attr, edge_index, edge_attr)
+        node_attr, edge_attr = self.conv(node_attr, edge_idx, edge_attr)
+        node_attr, edge_attr = self.smooth(node_attr, edge_idx, edge_attr)
 
         if self.node_norm_layer is not None:
             node_attr = self.node_norm_layer(node_attr)
@@ -141,16 +138,14 @@ class FlowGNN_conv_block(nn.Module):
 
 class FlowGNN_fc_block(nn.Module):
 
-    # TODO: hidden_layers_list = [8, 16, 32]
-    def __init__(self, out_dim, hidden_dim=32, layers_num=2):
+    def __init__(self, out_dim, hidden_layers):
         super(FlowGNN_fc_block, self).__init__()
         self.out_dim = out_dim
-        self.layers_num = layers_num
-        self.hidden_dim = hidden_dim
+        self.hidden_layers = hidden_layers
         self.layers = nn.ModuleList()
 
-        for i in range(self.layers_num - 1):
-            self.layers.append(nn.LazyLinear(self.hidden_dim))
+        for hidden_dim in self.hidden_layers:
+            self.layers.append(nn.LazyLinear(hidden_dim))
             self.layers.append(nn.ReLU())
         self.layers.append(nn.LazyLinear(self.out_dim))
 
@@ -166,9 +161,11 @@ class FlowGNN_fc_block(nn.Module):
 
 class FlowGNN(nn.Module):  # универсальная модель
 
-    def __init__(self, edge_filters, node_filters, fc_in_dim, fc_out_dim, SC_list=None, SC_ed_list=None,
-                 fc_skip_indx=None, batchnorm=None, selu=None, loss_func='mae',
-                 hidden_size=128, geom_in_dim=2, out_dim=4):
+    def __init__(self, edge_filters, node_filters, fc_in_dim, fc_out_dim,
+                 node_skip_cons_list=None, edge_skip_cons_list=None,
+                 fc_con_list=None, fc_hidden_layers=(128, 128),
+                 batchnorm=None, selu=None,
+                 geom_in_dim=2, out_dim=4):
         super(FlowGNN, self).__init__()
 
         self.edge_filters = edge_filters
@@ -177,81 +174,73 @@ class FlowGNN(nn.Module):  # универсальная модель
         self.fc_out_dim = fc_out_dim
 
         # каждому слою сопоставляется множество слоев из которых приходят SC
-        self.SC_ed_list = SC_ed_list
-        self.SC_list = SC_list  # [None, None, None, [0,1,2],...] В блок № 3 прокинуты скип конеккшены из блоков №№0-2
+        # [None, None, None, [0,1,2],...] В блок № 3 прокинуты скип коннекшены из блоков №№0-2
+        self.node_skip_cons_list = node_skip_cons_list
+        self.edge_skip_cons_list = edge_skip_cons_list
 
-        self.fc_skip_indx = fc_skip_indx  # [1,3,4,6] слои куда заходит fc слой
+        self.fc_con_list = fc_con_list  # [1,3,4,6] слои куда заходит fc слой
+        self.fc_hidden_layers = fc_hidden_layers
+
         self.batchnorm = batchnorm
         self.selu = selu
-        self.hidden_size = hidden_size
         self.geom_in_dim = geom_in_dim
         self.out_dim = out_dim
-        self.loss_func = loss_func
 
-        self.layer_list = nn.ModuleList()
-        self.FC_list = nn.ModuleList()
+        self.gcnn_layers_list = nn.ModuleList()
+        self.fc_layers_list = nn.ModuleList()
 
         for i, (ef, nf) in enumerate(zip(self.edge_filters, self.node_filters)):
 
-            if i in self.fc_skip_indx:
-                self.layer_list.append(
-                    FlowGNN_conv_block(ef, nf, skipcon_nodes_idx=self.SC_list[i], skipcon_edges_idx=self.SC_ed_list[i],
-                                       fc_skipcon=True, batchnorm=self.batchnorm[i], idx=i, selu=self.selu[i]))
-                self.FC_list.append(FlowGNN_fc_block(self.fc_out_dim, hidden_dim=32, layers_num=2))
-            else:
-                self.layer_list.append(
-                    FlowGNN_conv_block(ef, nf, skipcon_nodes_idx=self.SC_list[i], skipcon_edges_idx=self.SC_ed_list[i],
-                                       batchnorm=self.batchnorm[i], idx=i, selu=self.selu[i]))
+            fc_con = False
+            if i in self.fc_con_list:
+                fc_con = True
+                self.fc_layers_list.append(FlowGNN_fc_block(self.fc_out_dim, self.fc_hidden_layers))
+            self.gcnn_layers_list.append(FlowGNN_conv_block(ef, nf,
+                                                            node_skip_cons_idx=self.node_skip_cons_list[i],
+                                                            edge_skip_cons_idx=self.edge_skip_cons_list[i],
+                                                            fc_con=fc_con,
+                                                            batchnorm=self.batchnorm[i], idx=i,
+                                                            selu=self.selu[i]))
 
         self.decoder = nn.LazyLinear(self.out_dim)
 
-# TODO: move [:, :self.geom_in_dim+1] to dataset load
     def forward(self, data):
-        x, edge_index, edge_attr, bc, batch = data.x[:, :self.geom_in_dim+1], data.edge_index, data.edge_attr, data.bc, data.batch
+        x = data.x
 
-        x_outs = {}
-        edge_outs = {}
-        skipcon_nodes = None
-        skipcon_ed = None
+        x_outs = {}  # nodes
+        edge_outs = {}  # edges
+        skip_con_nodes = None
+        skip_con_edges = None
         skip_info = x[:, :self.geom_in_dim]
         fc_out = None
-        if self.fc_skip_indx is not None:
-            fc_out = self.FC_list[0](bc)
+        if self.fc_con_list is not None:
+            fc_out = self.fc_layers_list[0](data.bc)
         fc_count = 1
 
-        for i, layer in enumerate(self.layer_list):
+        for i, layer in enumerate(self.gcnn_layers_list):
 
-            if layer.skipcon_nodes_idx is not None:
-                skipcon_nodes = x_outs[layer.skipcon_nodes_idx[0]]
-                for i in layer.skipcon_nodes_idx[1:]:
-                    skipcon_nodes += x_outs[i]
+            if layer.node_skip_cons_idx is not None:
+                skip_con_nodes = x_outs[layer.node_skip_cons_idx[0]]
+                for i in layer.node_skip_cons_idx[1:]:
+                    skip_con_nodes += x_outs[i]
 
-            if layer.skipcon_edges_idx is not None:
-                skipcon_ed = edge_outs[layer.skipcon_edges_idx[0]]
-                for i in layer.skipcon_edges_idx[1:]:
-                    skipcon_ed += edge_outs[i]
+            if layer.edge_skip_cons_idx is not None:
+                skip_con_edges = edge_outs[layer.edge_skip_cons_idx[0]]
+                for i in layer.edge_skip_cons_idx[1:]:
+                    skip_con_edges += edge_outs[i]
 
-            if layer.idx in self.fc_skip_indx[1:]:
-                graph_pool = global_mean_pool(x, batch)
-                graph_pool = graph_pool[batch]
-                fc_out = self.FC_list[fc_count](torch.cat([bc, fc_out, graph_pool], 1))
+            if layer.idx in self.fc_con_list[1:]:
+                graph_pool = global_mean_pool(x, data.batch)
+                graph_pool = graph_pool[data.batch]
+                fc_out = self.fc_layers_list[fc_count](torch.cat([data.bc, fc_out, graph_pool], 1))
                 fc_count += 1
-            x, edge_attr = layer(x, edge_index, edge_attr, skipcon_nodes, skipcon_ed, fc_out, skip_info)
+            x, edge_attr = layer(x, data.edge_index, data.edge_attr, skip_con_nodes, skip_con_edges, fc_out, skip_info)
 
-            skipcon_nodes = None
-            skipcon_ed = None
+            skip_con_nodes = None
+            skip_con_edges = None
             x_outs[i] = x
             edge_outs[i] = edge_attr
 
         pred = self.decoder(x)
 
         return pred
-
-    # TODO: move from model
-    def loss(self, pred, inp):
-        true_flow = inp.flow
-        if self.loss_func == 'mae':
-            error = torch.mean(torch.abs(true_flow - pred), 1)
-        elif self.loss_func == 'mse':
-            error = torch.mean(torch.square(true_flow - pred), 1)
-        return torch.mean(error)

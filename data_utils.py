@@ -15,34 +15,6 @@ from torch_geometric.utils import (
 from utils import generate_edges_dir
 
 
-# class FlowDataset(Dataset):
-
-#     def __init__(self, data_dir, num_files,do_read = False, data_source = None, transform=None, pre_transform=None, pre_filter=None):
-#         super().__init__(data_dir, transform, pre_transform, pre_filter)
-
-#         self.data_dir = data_dir
-#         self.num_files = num_files
-#         self.file_list = None
-#         if do_read:
-#         # print(dataset_source)
-#             with open(data_source, 'r') as f:
-#                 #print(num_files)
-#                 self.file_list = f.read().splitlines()
-#                 self.file_list = file_list[:num_files]
-#         else:
-#                 self.file_list = os.listdir(os.path.join(self.data_dir, 'nodes'))
-
-
-#         def len(self):
-#             return self.num_files
-
-#         def get(self,idx):
-#             file_name = self.file_list[idx]
-
-#             nodes = pd.read_csv(os.path.join(self.data_dir, 'nodes', file_name)).values
-#             #edges
-
-
 def calc_norm_params(data_dir, file_list, num_fields=4,
                      geom_dim=2):  # norm parameters for flow fields, coordinates and boundary cond. in nodes
 
@@ -163,7 +135,7 @@ def make_dist_map(nodes):
     return torch.tensor(upd_nodes)
 
 
-def add_2hop_edges(edge_index, N) -> list:
+def add_2hop_edges(edge_index, N):
     k_hop_edges_index = []
     k_hop_edges_index.append(edge_index)
     adj = to_torch_csr_tensor(edge_index, size=(N, N))
@@ -173,17 +145,19 @@ def add_2hop_edges(edge_index, N) -> list:
     return k_hop_edges
 
 
-def makeDataset(data_dir, num_files, do_read=False, dataset_name=None, data_source=None, with_bc=False,
-                norm_coord=False, norm_flow=False, bc_in_nodes_norm=False, save=False,
-                norm_params_pth=None, num_fields=4, avstd=True, add_dist_func=False, hop2=False):
-    data_list = []
+def read_dataset(data_dir, num_files, dataset_name=None):
+    if dataset_name is None:
+        dataset_name = os.path.split((data_dir)[1] + '.pt')
+    data_list = torch.load(os.path.join(data_dir, dataset_name))[:num_files]
+    print(len(data_list))  # снеси потом
+    return data_list
 
-    if do_read:
-        if dataset_name is None:
-            dataset_name = os.path.split((data_dir)[1] + '.pt')
-        data_list = torch.load(os.path.join(data_dir, dataset_name))[:num_files]
-        print(len(data_list))  # снеси потом
-        return data_list
+
+# TODO: fix "flownorm1, flownorm2"
+def make_dataset(data_dir, num_files, dataset_name=None, data_source=None, with_bc=False,
+                 norm_coord=False, norm_flow=False, bc_in_nodes_norm=False, save=False,
+                 num_fields=4, avstd=True, add_dist_func=False, hop2=False, nodes_dim=None):
+    data_list = []
 
     if data_source is not None:
         # print(dataset_source)
@@ -226,7 +200,7 @@ def makeDataset(data_dir, num_files, do_read=False, dataset_name=None, data_sour
 
         # nodes = torch.tensor(pd.read_csv(os.path.join(data_dir,'nodes',file), header=None).values).to(torch.float32)
         nodes = pd.read_csv(os.path.join(data_dir, 'nodes', file), header=None).replace(-50, -5)
-        # nodes = nodes.replace(-50, 0)
+        nodes = nodes.iloc[:, :nodes_dim]
         nodes = torch.tensor(nodes.values).to(torch.float32)
 
         if add_dist_func:

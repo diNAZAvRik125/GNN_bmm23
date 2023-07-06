@@ -4,7 +4,15 @@ import numpy as np
 import torch
 
 
-def train_model(model, train_dataloader, val_dataloader, device, num_epochs, optimizer, scheduler, best_model_dir,
+def loss_mae(pred, inp):
+    return torch.mean(torch.abs(inp.flow - pred))
+
+
+def loss_mse(pred, inp):
+    return torch.mean(torch.square(inp.flow - pred))
+
+
+def train_model(model, train_dataloader, val_dataloader, device, num_epochs, optimizer, scheduler, loss_fn, out_dir,
                 collect_grads=False, comp_weigts=False, wait_epochs=2):
     train_loss_hist = []
     val_loss_hist = []
@@ -39,10 +47,11 @@ def train_model(model, train_dataloader, val_dataloader, device, num_epochs, opt
 
     for epoch in range(num_epochs):
 
-        train_loss, grad_norm = train_step(model, train_dataloader, device, optimizer, collect_grads=collect_grads)
+        train_loss, grad_norm = train_step(model, train_dataloader, device, optimizer, loss_fn,
+                                           collect_grads=collect_grads)
 
         if epoch == 0 and comp_weigts:
-            torch.save(model.state_dict(), os.path.join(best_model_dir, 'init_model.pt'))
+            torch.save(model.state_dict(), os.path.join(out_dir, 'init_model.pt'))
 
         if collect_grads and wait_epochs:
             grad_norms['node_mlp'].append(grad_norm['node_mlp'])
@@ -52,24 +61,24 @@ def train_model(model, train_dataloader, val_dataloader, device, num_epochs, opt
         scheduler.step()
 
         train_loss_hist.append(train_loss.detach().cpu().numpy())
-        val_loss = validation_step(model, val_dataloader, device)
+        val_loss = validation_step(model, val_dataloader, device, loss_fn)
         val_loss_hist.append(val_loss.detach().cpu().numpy())
 
-        print(f'Epoch: {epoch}')
+        print(f'Epoch: {epoch}/{num_epochs}')
         print("train loss", train_loss.item(),
               "val loss", val_loss.item())
         if val_loss < best_model_loss:
             best_model_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(best_model_dir, 'best_model.pt'))
+            torch.save(model.state_dict(), os.path.join(out_dir, 'best_model.pt'))
             print('Saved best model')
         # run.log({'train_loss': train_loss, 'val_loss': val_loss})
-        np.savetxt(os.path.join(best_model_dir, 'train_loss.csv'), train_loss_hist, delimiter=',')
-        np.savetxt(os.path.join(best_model_dir, 'val_loss.csv'), val_loss_hist, delimiter=',')
+        np.savetxt(os.path.join(out_dir, 'train_loss.csv'), train_loss_hist, delimiter=',')
+        np.savetxt(os.path.join(out_dir, 'val_loss.csv'), val_loss_hist, delimiter=',')
     # torch.save(wandb.run.dir, architecture + '_model.pt')
-    # artifact.add_file(os.path.join(best_model_dir, 'best_model.pt'))
+    # artifact.add_file(os.path.join(out_dir, 'best_model.pt'))
     # run.log_artifact(artifact)
     end.record()
-    with open(os.path.join(best_model_dir, 'train_time.txt'), 'w') as f:
+    with open(os.path.join(out_dir, 'train_time.txt'), 'w') as f:
         f.write(str(start.elapsed_time(end)))
     grad_norms['node_mlp'] = np.mean(np.array(grad_norms['node_mlp']), axis=0)
     grad_norms['edge_mlp'] = np.mean(np.array(grad_norms['edge_mlp']), axis=0)
@@ -79,7 +88,7 @@ def train_model(model, train_dataloader, val_dataloader, device, num_epochs, opt
     return train_loss_hist, val_loss_hist, grad_norms
 
 
-def train_step(model, dataloader, device, optimizer, collect_grads):
+def train_step(model, dataloader, device, optimizer, loss_fn, collect_grads):
     total_loss = 0
     num_loops = 0
     model.train()
@@ -88,7 +97,7 @@ def train_step(model, dataloader, device, optimizer, collect_grads):
         batch_gpu = batch.to(device)
         optimizer.zero_grad()
         pred = model(batch_gpu)
-        loss = model.loss(pred, batch_gpu)
+        loss = loss_fn(pred, batch_gpu)
         loss.backward()
         if collect_grads:
             grad_norm = collect_gradients(model)
@@ -112,7 +121,7 @@ def train_step(model, dataloader, device, optimizer, collect_grads):
     return total_loss, grads_av_epoch
 
 
-def validation_step(model, dataloader, device):
+def validation_step(model, dataloader, device, loss_fn):
     total_loss = 0
     num_loops = 0
     # data_list = []
@@ -121,7 +130,7 @@ def validation_step(model, dataloader, device):
         batch_gpu = batch.to(device)
         with torch.no_grad():
             pred = model(batch_gpu)
-            loss = model.loss(pred, batch_gpu)
+            loss = loss_fn(pred, batch_gpu)
             total_loss += loss
             num_loops += 1
     total_loss /= num_loops
